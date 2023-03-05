@@ -12,19 +12,15 @@ webp = "0.2.2"
 tokio = { version = "1.23.0", features = ["rt", "fs", "io-util", "signal", "macros", "rt-multi-thread"] }
 rayon = "1.7.0"
 
-anyhow = "1.0.68"
+zip = "0.6.4"
 
 axum = { version = "0.6.1", features = ["macros"] }
-hyper = "0.14.23"
-tower = { version = "0.4.13" }
 tower-http = { version = "0.3.5", features = ["compression-gzip", "compression-br"] }
-
-# serde = { version = "1.0.151", features = ["derive"] }
-# derive_more = "0.99.16"
-
-# persy = "1.4.3"
 
 fern = { version = "0.6.1", features = ["colored"]}
 log = "0.4.17"
 
 parking_lot = "0.12.1"
+
+[profile.release]
+lto = true
