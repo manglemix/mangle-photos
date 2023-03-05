@@ -9,7 +9,7 @@ edition = "2021"
 image = "0.24.5"
 webp = "0.2.2"
 
-tokio = { version = "1.23.0", features = ["rt", "fs", "io-util", "signal", "macros", "rt-multi-thread"] }
+tokio = { version = "1.23.0", features = ["rt", "signal", "macros", "rt-multi-thread"] }
 rayon = "1.7.0"
 
 zip = "0.6.4"
