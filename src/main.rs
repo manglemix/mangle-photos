@@ -3,22 +3,19 @@
 #![feature(iterator_try_collect)]
 
 use std::fs::read_dir;
-use std::mem::{forget, transmute, MaybeUninit};
+use std::mem::{forget, transmute};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::ops::Deref;
-use std::sync::Arc;
 use std::time::Instant;
 
-use axum::body::Body;
 use axum::http::HeaderValue;
 use axum::response::IntoResponse;
-use axum::routing::{get, MethodRouter};
+use axum::routing::{get};
 use axum::{Router, Server};
 use fern::Dispatch;
 use image::codecs::jpeg::JpegDecoder;
 use image::DynamicImage;
 use log::{error, LevelFilter};
-use parking_lot::Mutex;
 use std::io::{Cursor, Read, Write};
 use std::sync::mpsc::channel;
 use tower_http::compression::CompressionLayer;
@@ -28,10 +25,10 @@ use zip::ZipWriter;
 type SharedEntry = (
     // image name
     String,
-    // preview handler
-    MethodRouter<(), Body>,
-    // full handler
-    MethodRouter<(), Body>,
+    // Preview image
+    &'static [u8],
+    // Full image
+    &'static [u8]
 );
 
 #[tokio::main]
@@ -72,20 +69,11 @@ async fn main() {
         .try_collect::<Vec<_>>()
         .expect("Listing entry");
 
-    let mut shared: Vec<MaybeUninit<SharedEntry>> = Vec::with_capacity(listdir.len());
-    for _ in 0..listdir.len() {
-        shared.push(MaybeUninit::uninit());
-    }
-
-    // In-memory zip of all images
-    let zip_buffer = ZipWriter::new(Cursor::new(Vec::new()));
-    let all_zip = Arc::new(Mutex::new(zip_buffer));
-
     // Acts as a JoinHandle as rayon::spawn doesn't give one
-    let (ready_sender, ready_receiver) = channel::<()>();
+    let (ready_sender, ready_receiver) = channel::<SharedEntry>();
 
-    // Multithreaded preview generation, and zipping
-    for (i, file) in listdir.into_iter().enumerate() {
+    // Multithreaded image loading and preview generation
+    for file in listdir {
         let path = file.path();
 
         match path.extension().map(|x| x.to_str()).flatten() {
@@ -93,18 +81,9 @@ async fn main() {
             _ => continue,
         }
 
-        let all_zip = all_zip.clone();
         let ready_sender = ready_sender.clone();
-        // Instead of using synchronization primitives, I give a unique mut pointer
-        // of an element in shared to a task, so all tasks write in different locations
-        // on the same vector
-        let slot_ptr: *mut MaybeUninit<SharedEntry> = shared.get_mut(i).unwrap();
-        // SAFETY: The element is not-null and lives past the scope of the task
-        let slot_ptr: &mut MaybeUninit<SharedEntry> = unsafe { &mut *slot_ptr };
 
         rayon::spawn(move || {
-            let _ready_sender = ready_sender;
-
             // I read the whole image to memory, even though there is a method in image
             // to do that. For some reason, this is around 10x faster
             let mut file = std::fs::File::open(&path).expect("Loading image");
@@ -140,65 +119,66 @@ async fn main() {
                 .expect(&format!("filename to be valid: {fname:?}"))
                 .to_owned();
 
-            // Zip
-            {
-                let mut all_zip = all_zip.lock();
-                all_zip
-                    .start_file(&image_name, FileOptions::default())
-                    .expect("image to zip");
-
-                all_zip.write_all(full).expect("image to zip");
-            }
-
-            slot_ptr.write((
+            let _ = ready_sender.send((
                 image_name,
-                // Serve preview
-                get(move || async {
-                    let mut resp = preview.into_response();
-                    resp.headers_mut()
-                        .insert("Content-Type", HeaderValue::from_static("image/webp"));
-                    resp
-                }),
-                // Serve full image
-                get(move || async {
-                    let mut resp = full.into_response();
-                    resp.headers_mut()
-                        .insert("Content-Type", HeaderValue::from_static("image/jpeg"));
-                    resp
-                }),
+                preview,
+                full
             ));
         });
     }
 
     drop(ready_sender);
-    let _ = ready_receiver.recv();
-    println!("Image processing completed in {:?}", start_time.elapsed());
 
-    // Finalize the zeap and leak that data too
-    let mut all_zip = Arc::into_inner(all_zip).unwrap().into_inner();
+    let mut router = Router::new();
+    let mut home_page_body = String::with_capacity(0);
+    // In-memory zip of all images
+    let mut all_zip = ZipWriter::new(Cursor::new(Vec::new()));
+
+    while let Ok((image_name, preview_image, full_image)) = ready_receiver.recv() {
+        let preview_name = format!("/preview_{image_name}");
+
+        // Register handlers for preview and full images
+        router = router
+            .route(
+                &(format!("/{image_name}")),
+                get(move || async {
+                    let mut resp = full_image.into_response();
+                    resp.headers_mut()
+                        .insert("Content-Type", HeaderValue::from_static("image/jpeg"));
+                    resp
+                })
+            )
+            .route(
+                &preview_name,
+                get(move || async {
+                    let mut resp = preview_image.into_response();
+                    resp.headers_mut()
+                        .insert("Content-Type", HeaderValue::from_static("image/webp"));
+                    resp
+                })
+            );
+
+        // Add image to home page
+        home_page_body.push_str(
+            &format!("<a href=\"{image_name}\"><img src=\"{preview_name}\" style=\"width:900px;height:600px;\"></a><br>")
+        );
+
+        // Zip
+        all_zip
+            .start_file(&image_name, FileOptions::default())
+            .expect("image to zip");
+
+        all_zip.write_all(full_image).expect("image to zip");
+    }
+
+    // Finalize the zip and leak that data too
     let all_zip: &[u8] = all_zip
         .finish()
         .expect("Zip to succeed")
         .into_inner()
         .leak();
 
-    let mut router = Router::new();
-    let mut home_page_body = String::with_capacity(0);
-
-    for init in shared {
-        let (image_name, preview, full) = unsafe { init.assume_init() };
-        let preview_name = format!("/preview_{image_name}");
-
-        // Register handlers for preview and full images
-        router = router
-            .route(&(format!("/{image_name}")), full)
-            .route(&preview_name, preview);
-
-        // Add image to home page
-        home_page_body.push_str(
-            &format!("<a href=\"{image_name}\"><img src=\"{preview_name}\" style=\"width:900px;height:600px;\"></a><br>")
-        );
-    }
+    println!("Image processing completed in {:?}", start_time.elapsed());
 
     let home_page_doc = format!(
         "<html>
