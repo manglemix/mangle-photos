@@ -1,5 +1,5 @@
 # mangle-photos
-A personal app I created to quickly share photos across the local network
+A personal app I created to quickly share photos across a local network
 
 ## Motivation
 When I go on a trip with my friends, I'm usually the photographer. After a photo session, I need a way to efficiently share my photos with them.
