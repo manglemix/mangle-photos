@@ -250,16 +250,8 @@ async fn main() {
     };
 
     // Get port from command line or default to 80
-    let port = match std::env::args().last().unwrap().parse() {
-        Ok(n) => {
-            println!("Deploying to {n}");
-            n
-        }
-        Err(_) => {
-            println!("Defaulting to 80");
-            80
-        }
-    };
+    let port = std::env::args().last().unwrap().parse().unwrap_or(80);
+    println!("Deploying to {port}");
 
     Server::bind(&std::net::SocketAddr::V4(SocketAddrV4::new(
         Ipv4Addr::new(0, 0, 0, 0),
