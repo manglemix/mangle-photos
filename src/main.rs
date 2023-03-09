@@ -1,6 +1,7 @@
 #![feature(string_leak)]
 #![feature(arc_into_inner)]
 #![feature(iterator_try_collect)]
+#![feature(path_file_prefix)]
 
 use std::fs::read_dir;
 use std::mem::{forget, transmute, MaybeUninit};
@@ -93,19 +94,12 @@ async fn main() {
                 // Leak the webp
                 // Since there isn't a leak method, we manually leak it
                 let preview = unsafe {
-                    let ptr = transmute::<_, &'static [u8]>(preview.deref());
+                    let ptr: &[u8] = transmute(preview.deref());
                     forget(preview);
                     ptr
                 };
 
-                let fname = path.file_name().unwrap();
-
-                let image_name = fname
-                    .to_str()
-                    .expect(&format!("filename to be valid: {fname:?}"))
-                    .to_owned();
-
-                let _ = image_sender.send((i, image_name, preview, full));
+                let _ = image_sender.send((i, path, preview, full));
             });
         });
 
@@ -119,13 +113,17 @@ async fn main() {
     // In-memory zip of all images
     let mut all_zip = ZipWriter::new(Cursor::new(Vec::new()));
 
-    while let Ok((i, image_name, preview_image, full_image)) = image_receiver.recv() {
-        let preview_name = format!("/preview_{image_name}");
+    while let Ok((i, path, preview_image, full_image)) = image_receiver.recv() {
+        let fname = path.file_name().unwrap().to_str().unwrap();
+        let preview_name = format!(
+            "/preview_{}.webp",
+            path.file_prefix().unwrap().to_str().unwrap()
+        );
 
         // Register handlers for preview and full images
         router = router
             .route(
-                &(format!("/{image_name}")),
+                &(format!("/{fname}")),
                 get(move || async {
                     let mut resp = full_image.into_response();
                     resp.headers_mut()
@@ -148,12 +146,12 @@ async fn main() {
             .get_mut(i)
             .unwrap()
             .write(
-                format!("<a href=\"{image_name}\"><img src=\"{preview_name}\" style=\"width:900px;height:600px;\"></a><br>")
+                format!("<a href=\"{fname}\"><img src=\"{preview_name}\" style=\"width:900px;height:600px;\"></a><br>")
             );
 
         // Zip
         all_zip
-            .start_file(&image_name, FileOptions::default())
+            .start_file(fname, FileOptions::default())
             .expect("image to zip");
 
         all_zip.write_all(full_image).expect("image to zip");
